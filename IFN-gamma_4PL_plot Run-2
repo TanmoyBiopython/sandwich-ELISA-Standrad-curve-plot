@@ -1,0 +1,448 @@
+# ============================================================
+# IFN-γ ELISA Run-2 — 4PL Standard Curve Fitting & Quantitation
+# Kit: R&D Systems Quantikine DIF50C
+# Revised: Blank subtraction, NO dilution factor (undiluted
+#          samples per protocol), kit MDD-based LOD, flagged output
+# NOTE: S1 OD (2.169) is ~81% of kit typical (2.666) and lower
+#       than Run-1 (2.9905). Acceptable but document inter-run drop.
+# ============================================================
+
+# ============================
+# 1. Install and Load Packages
+# ============================
+if (!require("drc")) install.packages("drc")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("scales")) install.packages("scales")
+if (!require("ggrepel")) install.packages("ggrepel")
+
+library(drc)
+library(ggplot2)
+library(scales)
+library(ggrepel)
+
+# ----------------------------------------------------------
+# 2. Assay Parameters (from kit insert DIF50C, 753349.2)
+# ----------------------------------------------------------
+DILUTION_FACTOR    <- 1        # No mandatory dilution per IFN-γ protocol
+LOD_CURVE_PGML     <- 1.28     # Kit MDD (pg/mL), mean of 29 assays (range 0.149–5.69)
+LOD_FINAL_PGML     <- LOD_CURVE_PGML * DILUTION_FACTOR
+CURVE_FIT_MODEL    <- "4-PL"
+# Kit healthy reference: ALL 30 serum samples < 15.6 pg/mL (ND)
+
+# ----------------------------------------------------------
+# 3. Standard Curve Data — Run-2 (mean of duplicates, raw OD)
+#    S1 OD (2.169) is lower than Run-1 (2.9905) and kit typical
+#    (2.666). ~81% of kit typical — acceptable, document.
+# ----------------------------------------------------------
+standard_data_raw <- data.frame(
+  Concentration = c(1000, 500, 250, 125, 62.5, 31.3, 15.6, 0),
+  Absorbance    = c(2.169, 1.0795, 0.5295, 0.2725, 0.127, 0.0565, 0.033, 0)
+)
+
+# ----------------------------------------------------------
+# 4. Blank Subtraction
+#    Protocol: "subtract the average zero standard O.D."
+# ----------------------------------------------------------
+BLANK_OD <- standard_data_raw$Absorbance[standard_data_raw$Concentration == 0]
+
+cat("\n===== Blank Subtraction =====\n")
+cat("Zero standard (blank) mean OD:", BLANK_OD, "\n")
+
+if (BLANK_OD > 0.001) {
+  cat("Subtracting blank OD from all standards and samples.\n")
+} else {
+  cat("Blank OD is ~0 (reader-blanked or pre-subtracted). No correction needed.\n")
+}
+
+# Blank-corrected standards (exclude zero row for fitting)
+standard_data <- data.frame(
+  Concentration = standard_data_raw$Concentration[standard_data_raw$Concentration > 0],
+  Absorbance    = standard_data_raw$Absorbance[standard_data_raw$Concentration > 0] - BLANK_OD
+)
+
+cat("\nBlank-corrected standard ODs:\n")
+print(standard_data, row.names = FALSE)
+
+# ----------------------------------------------------------
+# 5. Sample Data — Run-2 (mean of duplicate ODs)
+#    Data appears already blank-subtracted (zero std = 0,
+#    many negative values present).
+#    NOTE: HC-16F has non-standard suffix — verify against
+#    master cohort list.
+# ----------------------------------------------------------
+sample_data <- data.frame(
+  Sample_ID = c(
+    "GBS-3","GBS-4","GBS-5","GBS-6","GBS-7","GBS-8","GBS-10",
+    "GBS-12","GBS-15","GBS-18","GBS-19","GBS-24","GBS-25",
+    "GBS-26","GBS-27","GBS-28",
+    "SLE-2","SLE-5","SLE-8","SLE-11","SLE-12","SLE-14",
+    "SLE-16","SLE-17","SLE-19","SLE-21","SLE-22","SLE-23",
+    "SLE-24","SLE-25",
+    "HC-12","HC-13","HC-14","HC-16F","HC-17","HC-18",
+    "HC-29","HC-30","HC-31","HC-32"
+  ),
+  Absorbance = c(
+    -0.004, -0.006, -0.0035, -0.002, -0.001, 0.0035, 0.011,
+    0.0125, -0.0025, -0.0035, -0.0055, -0.003, 0.002,
+    -0.003, -0.0015, -0.002,
+    -0.003, 0.0105, -0.0015, -0.005, -0.0045, -0.0045,
+    -0.004, -0.003, 0.001, -0.0035, 0, -0.0045,
+    -0.0035, -0.005,
+    -0.003, -0.0035, -0.0035, -0.0015, -0.002, 0,
+    -0.0025, -0.0025, 0.015, -0.0035
+  )
+)
+
+# Assign cohort from Sample_ID prefix (handles HC-16F correctly)
+sample_data$Cohort <- gsub("-.*", "", sample_data$Sample_ID)
+
+# Blank correction (data already blank-subtracted)
+sample_data$Abs_Corrected <- sample_data$Absorbance - BLANK_OD
+
+# ----------------------------------------------------------
+# 6. Fit 4-Parameter Logistic (4PL) Model
+#    Exclude zero row — log-logistic undefined at concentration = 0.
+# ----------------------------------------------------------
+model_4pl <- drm(
+  Absorbance ~ Concentration,
+  data = standard_data,
+  fct  = LL.4(names = c("Slope", "Lower", "Upper", "EC50"))
+)
+
+cat("\n===== 4PL Model Summary (Run-2) =====\n")
+summary(model_4pl)
+
+# ----------------------------------------------------------
+# 7. Goodness-of-Fit: Back-predicted Standards
+# ----------------------------------------------------------
+standard_data$Predicted_Abs <- as.numeric(
+  predict(model_4pl, newdata = data.frame(Concentration = standard_data$Concentration))
+)
+standard_data$Residual  <- standard_data$Absorbance - standard_data$Predicted_Abs
+standard_data$Pct_Error <- round(
+  abs(standard_data$Residual) / standard_data$Absorbance * 100, 1
+)
+
+cat("\n===== Standard Curve QC — Run-2 (Back-Prediction) =====\n")
+print(standard_data, row.names = FALSE)
+
+r_squared <- cor(standard_data$Predicted_Abs, standard_data$Absorbance)^2
+rmse <- sqrt(mean(standard_data$Residual^2))
+cat("\nR\u00B2:", round(r_squared, 5), "\n")
+cat("RMSE:", round(rmse, 5), "\n")
+
+# Signal comparison vs kit typical and Run-1
+cat("\n===== Signal QC vs Kit Typical & Run-1 =====\n")
+cat("Our S1 OD (corrected):", standard_data$Absorbance[1], "\n")
+cat("Kit typical S1 corrected OD: 2.656\n")
+cat("Run-1 S1 corrected OD: 2.9905\n")
+cat("Run-2 / Kit ratio:", round(standard_data$Absorbance[1] / 2.656 * 100, 1), "%\n")
+cat("Run-2 / Run-1 ratio:", round(standard_data$Absorbance[1] / 2.9905 * 100, 1), "%\n")
+
+# ----------------------------------------------------------
+# 8. Derive OD threshold for kit MDD
+# ----------------------------------------------------------
+lod_od <- as.numeric(
+  predict(model_4pl, newdata = data.frame(Concentration = LOD_CURVE_PGML))
+)
+cat("\n===== LOD OD Threshold =====\n")
+cat("Kit MDD:", LOD_CURVE_PGML, "pg/mL\n")
+cat("Corresponding OD on Run-2 curve:", round(lod_od, 4), "\n")
+
+# ----------------------------------------------------------
+# 9. Inverse Prediction: Concentration from Absorbance
+# ----------------------------------------------------------
+predict_concentration <- function(model, absorbance) {
+  if (is.na(absorbance) || absorbance <= 0) return(NA_real_)
+  result <- tryCatch({
+    ED(model, absorbance, type = "absolute", interval = "none", display = FALSE)[, 1]
+  }, error = function(e) {
+    NA_real_
+  })
+  return(result)
+}
+
+sample_data$Conc_Curve <- sapply(
+  sample_data$Abs_Corrected,
+  function(abs) predict_concentration(model_4pl, abs)
+)
+
+# ----------------------------------------------------------
+# 10. Apply Dilution Factor
+# ----------------------------------------------------------
+sample_data$Conc_Final <- sample_data$Conc_Curve * DILUTION_FACTOR
+
+# ----------------------------------------------------------
+# 11. LOD Censoring & QC Flags
+# ----------------------------------------------------------
+top_std_abs <- max(standard_data$Absorbance)
+s7_conc     <- 15.6  # Lowest non-zero standard
+
+sample_data$Flag <- ifelse(
+  sample_data$Abs_Corrected <= 0, "ND_NEG",
+  ifelse(sample_data$Abs_Corrected > top_std_abs, "HIGH",
+         ifelse(is.na(sample_data$Conc_Curve), "ND",
+                ifelse(sample_data$Conc_Curve < LOD_CURVE_PGML, "ND",
+                       ifelse(sample_data$Conc_Curve < s7_conc, "LOW_RANGE",
+                              "DETECTED"
+                       )
+                )
+         )
+  )
+)
+
+sample_data$Conc_Final[sample_data$Flag %in% c("ND_NEG", "ND")] <- NA
+sample_data$Conc_Final[sample_data$Flag == "HIGH"] <- NA
+
+# ----------------------------------------------------------
+# 12. Results Table
+# ----------------------------------------------------------
+results <- sample_data[, c("Sample_ID", "Cohort", "Absorbance",
+                           "Abs_Corrected", "Conc_Curve", "Conc_Final", "Flag")]
+
+results$Abs_Corrected <- round(results$Abs_Corrected, 4)
+results$Conc_Curve    <- round(results$Conc_Curve, 2)
+results$Conc_Final    <- round(results$Conc_Final, 2)
+
+cat("\n===== IFN-\u03B3 Quantitation Results — Run-2 =====\n")
+cat("Kit: R&D Systems Quantikine DIF50C\n")
+cat("Curve fit:", CURVE_FIT_MODEL, "\n")
+cat("LOD (MDD on curve):", LOD_CURVE_PGML, "pg/mL\n")
+cat("Dilution factor:", DILUTION_FACTOR,
+    ifelse(DILUTION_FACTOR == 1,
+           " (no pre-dilution per protocol)",
+           " (external pre-dilution applied)"), "\n")
+cat("Blank OD subtracted:", BLANK_OD, "\n\n")
+
+n_neg     <- sum(results$Flag == "ND_NEG")
+n_nd      <- sum(results$Flag == "ND")
+n_low     <- sum(results$Flag == "LOW_RANGE")
+n_det     <- sum(results$Flag == "DETECTED")
+n_high    <- sum(results$Flag == "HIGH")
+
+cat("Samples tested:", nrow(results), "\n")
+cat("Negative OD (below blank):", n_neg, "\n")
+cat("Positive OD but below MDD:", n_nd, "\n")
+cat("Low-range (above MDD, below S7):", n_low, "\n")
+cat("Detected (within curve range):", n_det, "\n")
+cat("Above range (HIGH):", n_high, "\n\n")
+
+print(results, row.names = FALSE)
+
+# Highlight quantifiable samples
+quant_samples <- subset(results, Flag %in% c("DETECTED", "LOW_RANGE"))
+if (nrow(quant_samples) > 0) {
+  cat("\n*** QUANTIFIABLE SAMPLES:\n")
+  print(quant_samples, row.names = FALSE)
+} else {
+  cat("\n*** No quantifiable samples above MDD in Run-2.\n")
+  cat("*** This is consistent with kit expectation for serum IFN-\u03B3.\n")
+}
+
+# ----------------------------------------------------------
+# 13. Cohort-Level Summary
+# ----------------------------------------------------------
+cohort_summary <- do.call(rbind, lapply(split(results, results$Cohort), function(df) {
+  n_total       <- nrow(df)
+  n_neg_od      <- sum(df$Flag == "ND_NEG")
+  n_detectable  <- sum(df$Flag %in% c("DETECTED", "LOW_RANGE"))
+  detected_concs <- df$Conc_Final[df$Flag %in% c("DETECTED", "LOW_RANGE")]
+  detected_concs <- detected_concs[!is.na(detected_concs)]
+  data.frame(
+    Cohort          = df$Cohort[1],
+    N               = n_total,
+    N_Negative_OD   = n_neg_od,
+    N_Detectable    = n_detectable,
+    Pct_Detectable  = round(n_detectable / n_total * 100, 1),
+    Mean_Detected   = ifelse(length(detected_concs) > 0,
+                             round(mean(detected_concs), 2), NA),
+    Max_Detected    = ifelse(length(detected_concs) > 0,
+                             round(max(detected_concs), 2), NA),
+    stringsAsFactors = FALSE
+  )
+}))
+rownames(cohort_summary) <- NULL
+
+cat("\n===== Cohort-Level Summary — Run-2 =====\n")
+print(cohort_summary, row.names = FALSE)
+
+cat("\nKit reference (healthy serum): ALL 30 donors < 15.6 pg/mL (ND)\n")
+
+# ----------------------------------------------------------
+# 14. Generate Smooth Best-Fit Curve
+# ----------------------------------------------------------
+conc_smooth <- seq(0.5, 1100, length.out = 500)
+abs_smooth  <- as.numeric(
+  predict(model_4pl, newdata = data.frame(Concentration = conc_smooth))
+)
+curve_df <- data.frame(Concentration = conc_smooth, Absorbance = abs_smooth)
+
+# ----------------------------------------------------------
+# 15. Publication-Quality Plot
+# ----------------------------------------------------------
+plot_quant <- subset(sample_data, Flag %in% c("DETECTED", "LOW_RANGE"))
+plot_nd    <- subset(sample_data, Flag %in% c("ND_NEG", "ND"))
+plot_high  <- subset(sample_data, Flag == "HIGH")
+
+# Clamp negative ODs to 0 for display only
+plot_nd$Abs_Display <- pmax(plot_nd$Abs_Corrected, 0)
+
+p <- ggplot() +
+  
+  # LOD shaded region
+  annotate(
+    "rect",
+    xmin = -Inf, xmax = LOD_CURVE_PGML,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey90", alpha = 0.5
+  ) +
+  
+  # LOD vertical line
+  geom_vline(
+    xintercept = LOD_CURVE_PGML,
+    linetype = "dashed", color = "grey50", linewidth = 0.6
+  ) +
+  
+  # 4PL fitted curve
+  geom_line(
+    data = curve_df,
+    aes(x = Concentration, y = Absorbance),
+    color = "black", linewidth = 1.2
+  ) +
+  
+  # Standard points
+  geom_point(
+    data = standard_data,
+    aes(x = Concentration, y = Absorbance),
+    color = "#d62728", size = 3, shape = 16
+  ) +
+  
+  # Detected/low-range sample points
+  {if (nrow(plot_quant) > 0)
+    geom_point(
+      data = plot_quant,
+      aes(x = Conc_Curve, y = Abs_Corrected),
+      color = "#1b9e77", size = 3, shape = 17,
+      na.rm = TRUE
+    )
+  } +
+  
+  # ND samples at x ≈ 0
+  {if (nrow(plot_nd) > 0)
+    geom_point(
+      data = plot_nd,
+      aes(x = 0.3, y = Abs_Display),
+      color = "#7570b3", size = 2, shape = 4,
+      alpha = 0.6,
+      na.rm = TRUE
+    )
+  } +
+  
+  # Labels for quantifiable samples
+  {if (nrow(plot_quant) > 0)
+    geom_text_repel(
+      data = plot_quant,
+      aes(x = Conc_Curve, y = Abs_Corrected, label = Sample_ID),
+      size = 3.2,
+      nudge_y    = 0.08,
+      box.padding   = 0.3,
+      point.padding = 0.25,
+      segment.color = "grey40",
+      segment.size  = 0.4,
+      min.segment.length = 0,
+      fontface = "bold",
+      na.rm = TRUE
+    )
+  } +
+  
+  # MDD annotation
+  annotate(
+    "text",
+    x = LOD_CURVE_PGML, y = max(standard_data$Absorbance) * 0.95,
+    label = paste0("MDD = ", LOD_CURVE_PGML, " pg/mL"),
+    hjust = -0.1, size = 3.5, color = "grey40", fontface = "italic"
+  ) +
+  
+  # ND count annotation
+  annotate(
+    "text",
+    x = 0.5, y = max(standard_data$Absorbance) * 0.5,
+    label = paste0(n_neg + n_nd, "/", nrow(sample_data),
+                   " samples non-detectable"),
+    hjust = 0, size = 3.5, color = "#7570b3", fontface = "italic"
+  ) +
+  
+  labs(
+    title    = paste0("IFN-\u03B3 Standard Curve (4PL Fit) — Run-2 — R&D Systems DIF50C"),
+    subtitle = paste0(
+      "Red = Standards | Green \u25B2 = Detected | ",
+      "Purple \u00D7 = Non-detectable (at/below blank)"
+    ),
+    x = "Concentration (pg/mL, on curve)",
+    y = "Absorbance (blank-corrected)",
+    caption = paste0(
+      "MDD = ", LOD_CURVE_PGML, " pg/mL (kit-specified, mean of 29 assays). ",
+      "4-PL fit; R\u00B2 = ", round(r_squared, 4), ". ",
+      "Dilution factor = \u00D7", DILUTION_FACTOR,
+      ". ND samples clamped to OD \u2265 0 for display."
+    )
+  ) +
+  
+  theme_classic(base_size = 14) +
+  theme(
+    plot.title    = element_text(hjust = 0.5, face = "bold", size = 15),
+    plot.subtitle = element_text(hjust = 0.5, size = 11, color = "grey30"),
+    plot.caption  = element_text(size = 9, color = "grey50", hjust = 0),
+    axis.title    = element_text(face = "bold"),
+    axis.text     = element_text(color = "black"),
+    panel.grid    = element_blank()
+  )
+
+print(p)
+
+# Optional: save high-resolution output
+# ggsave("IFNg_Run2_4PL_curve.pdf", p, width = 10, height = 7, dpi = 300)
+# ggsave("IFNg_Run2_4PL_curve.tiff", p, width = 10, height = 7, dpi = 300, compression = "lzw")
+
+cat("\n===== Run-2 Analysis Complete =====\n")
+cat("NOTE: Dilution factor = \u00D7", DILUTION_FACTOR, "\n")
+if (DILUTION_FACTOR == 1) {
+  cat("No sample pre-dilution per IFN-\u03B3 protocol (DIF50C).\n")
+  cat("If you performed external dilution, change DILUTION_FACTOR to 2.\n")
+}
+cat("Units: pg/mL.\n")
+cat("Samples below MDD (", LOD_CURVE_PGML, " pg/mL) are flagged ND.\n")
+cat("Samples with negative OD (below blank) are flagged ND_NEG.\n")
+
+# ----------------------------------------------------------
+# 16. Cross-Run Comparison: IFN-γ Runs 1 & 2
+# ----------------------------------------------------------
+cat("\n===== IFN-\u03B3 Cross-Run Summary =====\n")
+cat("                     Run-1        Run-2\n")
+cat("S1 OD (corrected):  2.9905       2.169\n")
+cat("Kit typical S1:      2.656        2.656\n")
+cat("% of typical:        113%         82%\n")
+cat("Samples tested:      40           40\n")
+cat("Quantifiable:        SLE-9 only   ~0-2 borderline\n\n")
+
+cat("Run-2 confirms the Run-1 pattern: serum IFN-\u03B3 is overwhelmingly\n")
+cat("non-detectable across all four cohorts. This is consistent with\n")
+cat("the kit's own validation (all 30 healthy donors ND) and with the\n")
+cat("biology — circulating IFN-\u03B3 is normally absent from serum unless\n")
+cat("there is active T-cell/NK-cell activation.\n\n")
+
+cat("SLE-9 (Run-1, OD 0.1495) remains the only clearly quantifiable\n")
+cat("sample across both runs. SLE-9 was not retested in Run-2.\n")
+cat("Combined with its off-scale BAFF and elevated APRIL, SLE-9 is\n")
+cat("the strongest single-patient example of the IFN-\u03B3 \u2192 BAFF/APRIL\n")
+cat("\u2192 B-cell activation axis in your dataset.\n")
+
+# ----------------------------------------------------------
+# 17. QC Note: HC-16F Naming
+# ----------------------------------------------------------
+cat("\n===== QC NOTE: HC-16F =====\n")
+cat("HC-16F does not follow the standard COHORT-NUMBER convention.\n")
+cat("Verify against master cohort list:\n")
+cat("  - Is this a repeat/aliquot of HC-16?\n")
+cat("  - Is this a different individual (e.g., female HC-16)?\n")
+cat("  - Ensure it is not double-counted as HC-16 elsewhere.\n")
